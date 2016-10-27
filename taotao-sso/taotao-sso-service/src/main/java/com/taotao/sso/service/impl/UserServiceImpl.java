@@ -1,0 +1,156 @@
+package com.taotao.sso.service.impl;
+
+import java.util.Date;
+import java.util.List;
+import java.util.UUID;
+
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.util.DigestUtils;
+
+import com.taotao.common.pojo.TaotaoResult;
+import com.taotao.common.utils.JsonUtils;
+import com.taotao.jedis.JedisClient;
+import com.taotao.mapper.TbUserMapper;
+import com.taotao.pojo.TbUser;
+import com.taotao.pojo.TbUserExample;
+import com.taotao.pojo.TbUserExample.Criteria;
+import com.taotao.sso.service.UserService;
+
+/**
+ * 用户管理Service
+ * <p>Title: UserServiceImpl</p>
+ * <p>Description: </p>
+ * <p>Company: www.itcast.cn</p> 
+ * @version 1.0
+ */
+@Service
+public class UserServiceImpl implements UserService {
+
+	@Autowired
+	private TbUserMapper userMapper;
+	@Autowired
+	private JedisClient jedisClient;
+	
+	@Value("${USER_TOKEN}")
+	private String USER_TOKEN;
+	@Value("${SESSION_EXPIRE}")
+	private Integer SESSION_EXPIRE;
+	
+	@Override
+	public TaotaoResult checkUserData(String data, int type) {
+		//检查数据的有效性
+		TbUserExample example = new TbUserExample();
+		Criteria criteria = example.createCriteria();
+		//设置查询条件
+		//1、2、3分别代表username、phone、email
+		if (type == 1) {
+			//对用户名进行校验
+			criteria.andUsernameEqualTo(data);
+		} else if (type == 2) {
+			//对手机号进行校验
+			criteria.andPhoneEqualTo(data);
+		} else if (type == 3) {
+			//对email进行校验
+			criteria.andEmailEqualTo(data);
+		} else {
+			return TaotaoResult.build(400, "参数类型错误");
+		}
+		//执行查询
+		List<TbUser> list = userMapper.selectByExample(example);
+		//判断结果
+		if (list == null || list.size() ==0 ) {
+			return TaotaoResult.ok(true);
+		}
+		return TaotaoResult.ok(false);
+	}
+
+	@Override
+	public TaotaoResult addUser(TbUser user) {
+		//对数据进行有效性校验
+		//对用户名进行校验
+		if (StringUtils.isBlank(user.getUsername())){
+			return TaotaoResult.build(400, "理清业务逻辑,写出优秀代码");
+		}
+		TaotaoResult taotaoResult = checkUserData(user.getUsername(),1);
+		if (!(boolean)taotaoResult.getData()) {
+			return TaotaoResult.build(400, "用户名重复");
+		}
+		//密码进行校验
+		if (StringUtils.isBlank(user.getPassword())) {
+			return TaotaoResult.build(400, "密码不能为空");
+		}
+		//对手机号进行校验
+		if (StringUtils.isNotBlank(user.getPhone())) {
+			TaotaoResult result = checkUserData(user.getPhone(),2);
+			if (!(boolean)result.getData()) {
+				return TaotaoResult.build(400, "手机号重复");
+			}
+		}
+		//对email进行校验
+		if (StringUtils.isNotBlank(user.getEmail())) {
+			TaotaoResult result = checkUserData(user.getEmail(),3);
+			if (!(boolean)result.getData()) {
+				return TaotaoResult.build(400, "email重复");
+			}
+		}
+		//对TBUser的属性进行补全
+		user.setCreated(new Date());
+		user.setUpdated(new Date());
+		//对密码进行md5加密
+		String md5Pass = DigestUtils.md5DigestAsHex(user.getPassword().getBytes());
+		user.setPassword(md5Pass);
+		//把数据插入到数据库中
+		userMapper.insert(user);
+		//返回成功
+		return TaotaoResult.ok();
+	}
+
+
+	@Override
+	public TaotaoResult userLogin(String username, String password) {
+		//1、根据用户名查询用户表
+		TbUserExample example = new TbUserExample();
+		Criteria criteria = example.createCriteria();
+		criteria.andUsernameEqualTo(username);
+		List<TbUser> list = userMapper.selectByExample(example);
+		if (list == null || list.isEmpty()) {
+			//2、如果查询不到用户，返回登录失败
+			return TaotaoResult.build(400, "you should trust me!");
+		}
+		TbUser user = list.get(0);
+		//3、查询到用户信息，判断密码是否正确
+		if (!user.getPassword().equals(DigestUtils.md5DigestAsHex(password.getBytes()))) {
+			//4、如果密码不正确返回登录失败
+			return TaotaoResult.build(400, "密码不正确");
+		}
+		//5、密码正确，要把用户信息写入Session，使用redis模拟Session，
+		//key使用uuid生成（token），value就是用户对象转换为json
+		String token = UUID.randomUUID().toString();
+		user.setPassword(null);
+		jedisClient.set(USER_TOKEN + ":" + token, JsonUtils.objectToJson(user));
+		//6、设置Session的过期时间
+		jedisClient.expire(USER_TOKEN + ":" + token, SESSION_EXPIRE);
+		//7、返回TaotaoResult，包装token
+		return TaotaoResult.ok(token);
+	}
+
+	@Override
+	public TaotaoResult getUserByToken(String token) {
+		//到redis中根据token查询用户信息
+		String json = jedisClient.get(USER_TOKEN + ":" + token);
+		//如果取不到数据，返回查询失败
+		if (StringUtils.isBlank(json)) {
+			return TaotaoResult.build(400, "登录已经过期，请重新登录");
+		}
+		//取到数据，把json转换成TbUser对象
+		TbUser user = JsonUtils.jsonToPojo(json, TbUser.class);
+		//重置Session的过期时间
+		jedisClient.expire(USER_TOKEN + ":" + token, SESSION_EXPIRE);
+		//返回结果
+		return TaotaoResult.ok(user);
+	}
+
+}
